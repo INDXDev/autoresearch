@@ -1,0 +1,12 @@
+# Auto Research's publishers have NO third-party Python dependencies.
+#
+# The deterministic publishers (scripts/publish_section.py, publish_watch.py) and
+# their helpers (github_issue.py, slack_post.py, i18n.py, watch_targets.py,
+# build_site.py) use only the Python standard library (urllib, json, difflib).
+# The research half runs inside the Claude Code Action, which manages its own
+# runtime. Nothing here to install.
+#
+# The ONE exception is the 👀 Site Watch job, which renders pages with a real
+# browser. Its workflow step installs Playwright + Chromium on the fly
+# (`pip install playwright` + `playwright install --with-deps chromium`), so it
+# is deliberately NOT pinned here — nothing else needs it.

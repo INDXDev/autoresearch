@@ -1,0 +1,215 @@
+name: Publish Site
+
+# Aggregates EVERY Auto Research Issue into a rich documentation website
+# (Astro + Starlight) and publishes it to the dedicated `gh-pages` branch.
+#
+# It is the "wrap-up" half of the project: the per-section jobs in
+# `auto-research.yml` file one GitHub Issue per item (📰 news / 💡 hypotheses /
+# 📚 related work / 👀 site-watch), and `auto-label.yml` adds topical labels.
+# This workflow reads ALL of those Issues back — the single source of truth,
+# together with each Issue's labels (tags), reactions, and comments — and turns
+# them into Markdown the Starlight site renders:
+#
+#   * scripts/build_site.py (Python, no LLM) -> site/src/content/docs/**
+#     - index.md           : splash landing page (hero + stats + item feed)
+#     - runs/<date>.md      : one page per run; items grouped by section, each
+#                             card showing body + tags + reactions + comments
+#     - items/<number>.md   : one page per item (full body + tags + reactions +
+#                             comments)
+#     - sections/<key>.md   : one page per layer (Latest / Takes / Foundations /
+#                             Site Watch)
+#     - reactions/<slug>.md : one page per reaction (👍 ❤️ …)
+#     - tags/<slug>.md      : one page per topical tag
+#   * Astro + Starlight build -> site/dist (sidebar, full-text search, dark mode)
+#   * peaceiris/actions-gh-pages -> push site/dist to the `gh-pages` branch
+#
+# Two-halves philosophy holds: Python does the deterministic data work, the SSG
+# does presentation, and NO LLM is involved here.
+#
+# Triggers:
+#   * automatically after the "Auto Label" OR "Auto Research" workflow finishes
+#     (workflow_run) — running after Auto Label means topical tags exist before
+#     the site builds; and
+#   * manually from the Actions tab (workflow_dispatch).
+#
+# One-time setup: Settings -> Pages -> "Build and deployment" ->
+#   Source = "Deploy from a branch", Branch = "<the one that renders>" / "(root)".
+# Because where Pages serves the site decides the `base` baked into its CSS/JS
+# (PUBLIC project pages live under "/<repo>/"; PRIVATE pages live at a random
+# subdomain ROOT "/"), and we can't know which from inside the build, the FIRST
+# run with no SITE_BASE Variable publishes BOTH variants to two branches:
+#   * gh-pages       -> built with base "/<repo>/"  (public project Pages)
+#   * gh-pages-root  -> built with base "/"         (private root Pages)
+# Pick whichever branch renders correctly (CSS loads) in the Branch dropdown.
+# Once you know, set the repo Variable SITE_BASE ("/" or "/<repo>/") and only the
+# matching branch is rebuilt from then on (the other stays as a harmless stale
+# branch you may delete). SITE_BASE=/ -> gh-pages-root ; any subpath -> gh-pages.
+#
+# Optional live comments/reactions (giscus): enable Discussions, install the
+# giscus GitHub App, then set repo Variables GISCUS_REPO / GISCUS_REPO_ID /
+# GISCUS_CATEGORY / GISCUS_CATEGORY_ID (see README). Without them the site is a
+# fully static snapshot of the Issues' comments + reactions.
+on:
+  workflow_run:
+    workflows: ["Auto Label", "Auto Research"]
+    types: [completed]
+  workflow_dispatch: {}
+
+# Least privilege: read the repo + Issues, and write contents (to push the built
+# site to the `gh-pages` branch). `issues: read` is REQUIRED — build_site.py
+# reads ALL Issues (and their comments) back via the API to render the site.
+permissions:
+  contents: write
+  issues: read
+
+# Never run two deployments at once, and don't cancel one in flight (a partial
+# push to gh-pages is worse than waiting).
+concurrency:
+  group: publish-site
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    # Gate the auto-trigger so we deploy exactly ONCE per cycle, with tags:
+    #   * manual dispatch always runs (when not disabled);
+    #   * an upstream run must have SUCCEEDED (`completed` also fires on
+    #     failure/cancellation, which we must not deploy);
+    #   * after "Auto Label" → run (topical tags now exist); after
+    #     "Auto Research" → run ONLY when auto-labelling is disabled, otherwise
+    #     skip and let the Auto Label run trigger the build so tags are present
+    #     (avoids a premature first deploy without tags + a second with them).
+    # Disable the whole site publish with the repo Variable ENABLE_PUBLISH_SITE=false.
+    if: >-
+      ${{ vars.ENABLE_PUBLISH_SITE != 'false'
+          && (github.event_name == 'workflow_dispatch'
+              || (github.event.workflow_run.conclusion == 'success'
+                  && (github.event.workflow_run.name == 'Auto Label'
+                      || (github.event.workflow_run.name == 'Auto Research'
+                          && vars.ENABLE_AUTO_LABEL == 'false')))) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Record build timestamp
+        run: echo "SITE_BUILT_AT=$(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_ENV"
+
+      # The site's look (title / tagline / brand colour) was designed once by the
+      # agent in the Auto Research `select` job and remembered on the unified
+      # `auto-research-state` branch. Restore it, then turn it into the build's
+      # theme.css + SITE_TITLE / SITE_TAGLINE env. A repo Variable (SITE_TITLE /
+      # SITE_TAGLINE) still wins; with no design yet the shipped default is used.
+      - name: Restore the AI-designed site look from the state branch
+        run: bash scripts/restore_state.sh auto-research-state site_config.json
+
+      - name: Apply the AI-designed site look (Python)
+        env:
+          OUTPUT_LANGUAGE: ${{ vars.OUTPUT_LANGUAGE || secrets.OUTPUT_LANGUAGE }}
+          RESEARCH_TOPIC: ${{ vars.RESEARCH_TOPIC || 'AI' }}
+          SITE_TITLE: ${{ vars.SITE_TITLE }}
+          SITE_TAGLINE: ${{ vars.SITE_TAGLINE }}
+          SITE_STATE_FILE: site_config.json
+          SITE_DIR: site
+        run: python3 scripts/site_config.py emit
+
+      - name: Export Issues to Starlight content (Python)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT_LANGUAGE: ${{ vars.OUTPUT_LANGUAGE || secrets.OUTPUT_LANGUAGE }}
+          RESEARCH_TOPIC: ${{ vars.RESEARCH_TOPIC || 'AI' }}
+          SITE_MAX_ISSUES: ${{ vars.SITE_MAX_ISSUES }}
+          SITE_FETCH_COMMENTS: ${{ vars.SITE_FETCH_COMMENTS }}
+        run: python3 scripts/build_site.py site
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install site dependencies
+        working-directory: site
+        run: npm ci
+
+      # We can't tell from inside the build whether Pages will serve this site at
+      # "/<repo>/" (public project Pages) or "/" (private root Pages), and that
+      # decides the `base` baked into every CSS/JS URL. So with NO SITE_BASE
+      # Variable set we build BOTH variants and publish each to its own branch;
+      # the user picks the one that renders in Settings -> Pages. Once SITE_BASE
+      # is set we build only the matching variant. astro.config.mjs derives
+      # "/<repo>/" from GITHUB_REPOSITORY when SITE_BASE is empty.
+
+      - name: Build site for the SUBPATH base ("/<repo>/", public project Pages)
+        if: ${{ vars.SITE_BASE != '/' }}
+        working-directory: site
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Empty -> config derives "/<repo>/"; an explicit subpath is honoured.
+          SITE_BASE: ${{ vars.SITE_BASE }}
+          SITE_URL: ${{ vars.SITE_URL }}
+          OUTPUT_LANGUAGE: ${{ vars.OUTPUT_LANGUAGE || secrets.OUTPUT_LANGUAGE }}
+          # SITE_TITLE comes from the "Apply the AI-designed site look" step via
+          # $GITHUB_ENV (it already resolves the SITE_TITLE Variable pin > AI
+          # design > default), so it is intentionally NOT re-set here — a step-level
+          # empty value would otherwise clobber it.
+          # Optional giscus (live comments/reactions). Unset -> not rendered.
+          PUBLIC_GISCUS_REPO: ${{ vars.GISCUS_REPO }}
+          PUBLIC_GISCUS_REPO_ID: ${{ vars.GISCUS_REPO_ID }}
+          PUBLIC_GISCUS_CATEGORY: ${{ vars.GISCUS_CATEGORY }}
+          PUBLIC_GISCUS_CATEGORY_ID: ${{ vars.GISCUS_CATEGORY_ID }}
+          PUBLIC_GISCUS_LANG: ${{ vars.GISCUS_LANG }}
+        run: |
+          npm run build
+          rm -rf "$RUNNER_TEMP/dist-sub"
+          mv dist "$RUNNER_TEMP/dist-sub"
+
+      - name: Build site for the ROOT base ("/", private root Pages)
+        if: ${{ vars.SITE_BASE == '' || vars.SITE_BASE == '/' }}
+        working-directory: site
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SITE_BASE: "/"
+          SITE_URL: ${{ vars.SITE_URL }}
+          OUTPUT_LANGUAGE: ${{ vars.OUTPUT_LANGUAGE || secrets.OUTPUT_LANGUAGE }}
+          # SITE_TITLE is provided by the "Apply the AI-designed site look" step
+          # via $GITHUB_ENV (pin > AI design > default) — not re-set here.
+          PUBLIC_GISCUS_REPO: ${{ vars.GISCUS_REPO }}
+          PUBLIC_GISCUS_REPO_ID: ${{ vars.GISCUS_REPO_ID }}
+          PUBLIC_GISCUS_CATEGORY: ${{ vars.GISCUS_CATEGORY }}
+          PUBLIC_GISCUS_CATEGORY_ID: ${{ vars.GISCUS_CATEGORY_ID }}
+          PUBLIC_GISCUS_LANG: ${{ vars.GISCUS_LANG }}
+        run: |
+          npm run build
+          rm -rf "$RUNNER_TEMP/dist-root"
+          mv dist "$RUNNER_TEMP/dist-root"
+
+      # peaceiris writes .nojekyll automatically so Astro's _astro/ assets
+      # (hashed JS/CSS in an underscore dir) are served by Pages.
+      - name: Deploy the SUBPATH build to the gh-pages branch
+        if: ${{ vars.SITE_BASE != '/' }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ${{ runner.temp }}/dist-sub
+          publish_branch: gh-pages
+          user_name: github-actions[bot]
+          user_email: github-actions[bot]@users.noreply.github.com
+          commit_message: "Publish site (base /<repo>/): ${{ github.sha }}"
+
+      - name: Deploy the ROOT build to the gh-pages-root branch
+        if: ${{ vars.SITE_BASE == '' || vars.SITE_BASE == '/' }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ${{ runner.temp }}/dist-root
+          publish_branch: gh-pages-root
+          user_name: github-actions[bot]
+          user_email: github-actions[bot]@users.noreply.github.com
+          commit_message: "Publish site (base /): ${{ github.sha }}"

@@ -1,0 +1,126 @@
+name: Auto Label
+
+# Tags the Issues created by today's research run with topical labels.
+#
+# Same two-halves philosophy as the rest of the template, applied to labelling:
+#   1. CONTEXT (Python)  — scripts/label_context.py lists the Issues generated
+#                          today (across every section) plus the repo's existing
+#                          label taxonomy, into .label_context/issues.md.
+#                          Deterministic, no LLM.
+#   2. LABEL (Claude)    — claude-code-action reads that file and returns a
+#                          schema-validated JSON object: per Issue, which labels
+#                          to ADD (reusing existing labels where they fit, minting
+#                          new ones only when needed). This is the open-ended half.
+#   3. APPLY (Python)    — scripts/apply_labels.py adds those labels to each Issue
+#                          via the GitHub API (ADDITIVE — the pipeline labels each
+#                          Issue already carries are kept). Deterministic, no LLM.
+#
+# Triggers:
+#   * automatically after the "Auto Research" workflow finishes (workflow_run),
+#     so freshly filed Issues get labelled right away; and
+#   * manually from the Actions tab (workflow_dispatch).
+#
+# Works out of the box: with no Claude credential yet, the job still succeeds and
+# prints a note. Disable entirely with the repo variable ENABLE_AUTO_LABEL=false.
+on:
+  workflow_run:
+    workflows: ["Auto Research"]
+    types: [completed]
+  workflow_dispatch: {}
+
+# Least privilege: read the repo, write Issues (to add labels), and an OIDC token
+# (claude-code-action authenticates via OIDC, which needs id-token: write).
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+
+# Avoid overlapping runs (the research workflow finishing + a manual dispatch).
+concurrency:
+  group: auto-label
+  cancel-in-progress: false
+
+jobs:
+  label:
+    # Run on manual dispatch, or only when the upstream Auto Research run actually
+    # SUCCEEDED (a `completed` workflow_run fires for failed/cancelled runs too).
+    if: >-
+      ${{ vars.ENABLE_AUTO_LABEL != 'false'
+          && (github.event_name == 'workflow_dispatch'
+              || github.event.workflow_run.conclusion == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Check for an LLM credential
+        id: preflight
+        env:
+          A: ${{ secrets.ANTHROPIC_API_KEY }}
+          O: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          P: ${{ secrets.OPENAI_API_KEY }}
+          T: ${{ secrets.CODEX_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$A" ] || [ -n "$O" ] || [ -n "$P" ] || [ -n "$T" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Auto Label::No LLM credential yet. Add CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY (Claude, the main), or OPENAI_API_KEY (Codex, the sub), under Settings -> Secrets and variables -> Actions to enable auto-labelling. Skipping for now."
+          fi
+
+      - name: Gather today's issues + label taxonomy (Python)
+        id: context
+        if: ${{ steps.preflight.outputs.has_key == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ISSUE_LABELS: ${{ vars.GITHUB_ISSUE_LABELS || 'auto-research' }}
+          LABEL_CONTEXT_MAX: ${{ vars.LABEL_CONTEXT_MAX }}
+          LABEL_BODY_MAX: ${{ vars.LABEL_BODY_MAX }}
+        run: python3 scripts/label_context.py .label_context/issues.md
+
+      - name: Decide labels (Claude → Codex)
+        id: labeler
+        if: ${{ steps.preflight.outputs.has_key == 'true' && steps.context.outputs.has_issues == 'true' }}
+        uses: ./.github/actions/agent
+        with:
+          allowed-tools: Read
+          max-turns: "20"
+          web-search: "false"
+          anthropic-model: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+          openai-model: ${{ vars.OPENAI_MODEL }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-access-token: ${{ secrets.CODEX_ACCESS_TOKEN }}
+          json-schema: '{"type":"object","additionalProperties":false,"properties":{"labels":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"issue":{"type":"integer"},"add":{"type":"array","items":{"type":"string"}},"reason":{"type":"string"}},"required":["issue","add"]}}},"required":["labels"]}'
+          prompt: |
+            You are the lab's issue triager. The auto-research pipeline just filed
+            a batch of GitHub Issues today, and your job is to add useful TOPICAL
+            labels to each one.
+
+            Use the Read tool to read `.label_context/issues.md`. It lists every
+            Issue generated today — each with its `issue` NUMBER, current labels,
+            and a trimmed body — followed by the labels that ALREADY exist in this
+            repo. Also read `config/prompts/labeling.md` for the lab's labelling
+            guidance.
+
+            For EACH Issue, decide which labels to ADD. Reuse an existing label
+            verbatim when it fits; only invent a new, short, reusable label when
+            nothing existing captures the topic. Do NOT repeat the pipeline labels
+            an Issue already carries (auto-research / research-news / hypothesis /
+            related-work / site-watch) — add labels that describe the SUBJECT.
+            Keep it to about 1-4 labels per Issue; add none if nothing fits.
+
+            Address each Issue by copying its `issue` number exactly. Write any
+            new label names in lowercase, hyphenated form (e.g. `world-models`).
+
+            Return ONLY the JSON object required by the schema.
+
+      - name: Apply labels to the issues (Python)
+        if: ${{ steps.labeler.outputs.structured_output != '' }}
+        env:
+          LABELS_JSON: ${{ steps.labeler.outputs.structured_output }}
+          LABEL_MAX_PER_ISSUE: ${{ vars.LABEL_MAX_PER_ISSUE }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/apply_labels.py

@@ -1,0 +1,141 @@
+name: "Research Agent (Claude primary, Codex fallback)"
+description: >
+  Run one schema-constrained agent turn and return its JSON as `structured_output`.
+  MAIN is Claude (anthropics/claude-code-action); the SUB is OpenAI Codex
+  (openai/codex-action), used ONLY when no Claude credential is present but an
+  OpenAI key / Codex access token is. Either way the caller gets the same
+  `structured_output` JSON string, so the deterministic Python publishers don't
+  care which engine produced it.
+
+inputs:
+  prompt:
+    description: The task prompt (written Claude-style; Codex follows it too).
+    required: true
+  json-schema:
+    description: >
+      Bare JSON Schema string the output must conform to. Pass it WITHOUT
+      surrounding quotes; this action quotes it for Claude's --json-schema and
+      embeds it in Codex's prompt as the output contract.
+    required: true
+  allowed-tools:
+    description: Claude allowedTools list (e.g. "WebSearch,WebFetch,Read").
+    required: false
+    default: "WebSearch,WebFetch,Read"
+  max-turns:
+    description: Max agent turns.
+    required: false
+    default: "30"
+  web-search:
+    description: >
+      "true" to let the Codex sub use live web search (--search). Set "false"
+      for Read-only jobs (the domain picker) so Codex doesn't browse needlessly.
+    required: false
+    default: "true"
+  anthropic-model:
+    description: Model id for the Claude main.
+    required: false
+    default: "claude-sonnet-4-6"
+  openai-model:
+    description: Model id for the Codex sub. Empty lets Codex pick its default.
+    required: false
+    default: ""
+  claude-code-oauth-token:
+    description: secrets.CLAUDE_CODE_OAUTH_TOKEN (Claude Pro/Max plan token).
+    required: false
+    default: ""
+  anthropic-api-key:
+    description: secrets.ANTHROPIC_API_KEY.
+    required: false
+    default: ""
+  openai-api-key:
+    description: secrets.OPENAI_API_KEY (the supported Codex credential).
+    required: false
+    default: ""
+  codex-access-token:
+    description: >
+      secrets.CODEX_ACCESS_TOKEN — best-effort passthrough for ChatGPT/Codex
+      workspace tokens. OPENAI_API_KEY is the fully-supported path.
+    required: false
+    default: ""
+
+outputs:
+  structured_output:
+    description: The agent's JSON object as a string (empty if no credential).
+    value: ${{ steps.claude.outputs.structured_output || steps.normalize.outputs.json }}
+
+runs:
+  using: composite
+  steps:
+    # Decide which engine to use. Claude wins whenever a Claude credential is
+    # present; Codex is the sub, reached only as a fallback.
+    - name: Pick engine (Claude main → Codex sub)
+      id: engine
+      shell: bash
+      env:
+        A: ${{ inputs.anthropic-api-key }}
+        O: ${{ inputs.claude-code-oauth-token }}
+        P: ${{ inputs.openai-api-key }}
+        T: ${{ inputs.codex-access-token }}
+      run: |
+        if [ -n "$A" ] || [ -n "$O" ]; then
+          echo "engine=claude" >> "$GITHUB_OUTPUT"
+        elif [ -n "$P" ] || [ -n "$T" ]; then
+          echo "engine=codex" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Research Agent::No Claude credential — falling back to the OpenAI Codex sub."
+        else
+          echo "engine=none" >> "$GITHUB_OUTPUT"
+        fi
+
+    # MAIN: Claude Code Action. Returns a clean, schema-validated structured_output.
+    - name: Run main (Claude Code)
+      id: claude
+      if: ${{ steps.engine.outputs.engine == 'claude' }}
+      uses: anthropics/claude-code-action@v1
+      with:
+        claude_code_oauth_token: ${{ inputs.claude-code-oauth-token }}
+        anthropic_api_key: ${{ inputs.anthropic-api-key }}
+        prompt: ${{ inputs.prompt }}
+        claude_args: |
+          --allowedTools ${{ inputs.allowed-tools }}
+          --max-turns ${{ inputs.max-turns }}
+          --model ${{ inputs.anthropic-model }}
+          --json-schema '${{ inputs.json-schema }}'
+
+    # SUB: OpenAI Codex. The official action exposes only `final-message`, and
+    # its --output-schema is unreliable with web search active (openai/codex#15451)
+    # and assumes OpenAI strict schemas (every field required) which ours aren't —
+    # so we DON'T use --output-schema. Instead we hand Codex the schema in the
+    # prompt as a hard output contract, run it read-only (it only needs to read
+    # repo files + search), and recover the JSON object with extract_json.py.
+    - name: Run sub (OpenAI Codex)
+      id: codex
+      if: ${{ steps.engine.outputs.engine == 'codex' }}
+      uses: openai/codex-action@v1
+      env:
+        CODEX_ACCESS_TOKEN: ${{ inputs.codex-access-token }}
+      with:
+        openai-api-key: ${{ inputs.openai-api-key }}
+        model: ${{ inputs.openai-model }}
+        sandbox: read-only
+        # codex-args takes a JSON-array string (the action's documented contract).
+        codex-args: ${{ inputs.web-search == 'true' && '["--search"]' || '' }}
+        prompt: |
+          ${{ inputs.prompt }}
+
+          ---
+          STRICT OUTPUT CONTRACT (read carefully):
+          Your final message MUST be exactly ONE JSON object and NOTHING else —
+          no explanation, no commentary, no Markdown code fences. It MUST conform
+          to this JSON Schema (omit properties that are optional and unknown;
+          never invent data to fill a field):
+          ${{ inputs.json-schema }}
+
+    # Recover the single JSON object from Codex's free-form final message.
+    # Runs from the checked-out workspace root, so scripts/ resolves directly.
+    - name: Normalise Codex output to clean JSON
+      id: normalize
+      if: ${{ steps.engine.outputs.engine == 'codex' }}
+      shell: bash
+      env:
+        RAW: ${{ steps.codex.outputs.final-message }}
+      run: python3 scripts/extract_json.py

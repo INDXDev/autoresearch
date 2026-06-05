@@ -1,0 +1,40 @@
+---
+// Override of Starlight's Footer: render the default footer, then (optionally)
+// a live giscus comment + reaction box. giscus is GitHub-Discussions-backed and
+// only rendered when ALL four PUBLIC_GISCUS_* env vars are provided at build
+// time; otherwise the site is a fully static snapshot with no extra widget.
+import Default from '@astrojs/starlight/components/Footer.astro';
+
+const repo = import.meta.env.PUBLIC_GISCUS_REPO;
+const repoId = import.meta.env.PUBLIC_GISCUS_REPO_ID;
+const category = import.meta.env.PUBLIC_GISCUS_CATEGORY;
+const categoryId = import.meta.env.PUBLIC_GISCUS_CATEGORY_ID;
+const lang = import.meta.env.PUBLIC_GISCUS_LANG || (import.meta.env.OUTPUT_LANGUAGE || 'en');
+const enabled = Boolean(repo && repoId && category && categoryId);
+---
+
+<Default><slot /></Default>
+
+{
+  enabled && (
+    <section class="ar-giscus">
+      <script
+        is:inline
+        src="https://giscus.app/client.js"
+        data-repo={repo}
+        data-repo-id={repoId}
+        data-category={category}
+        data-category-id={categoryId}
+        data-mapping="pathname"
+        data-strict="1"
+        data-reactions-enabled="1"
+        data-emit-metadata="0"
+        data-input-position="bottom"
+        data-theme="preferred_color_scheme"
+        data-lang={lang}
+        crossorigin="anonymous"
+        async
+      />
+    </section>
+  )
+}

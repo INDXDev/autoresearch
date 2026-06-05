@@ -1,0 +1,820 @@
+name: Auto Research
+
+# Runs once a day, and can be run manually from the Actions tab.
+#
+# Design (two clear halves per section):
+#   1. RESEARCH  — Claude Code Action web-searches and returns a schema-validated
+#                  JSON object (`structured_output`). This is the open-ended,
+#                  trial-and-error half.
+#   2. PUBLISH   — a small Python script turns that JSON into GitHub Issues,
+#                  ONE per item (each news item / paper / hypothesis), plus an
+#                  optional file + Slack line each. Deterministic — no LLM calls.
+#
+# Each section (news / hypotheses / related work / site watch) is its OWN job,
+# gated by its own flag, so they run independently and in parallel. Enable any
+# subset. Site Watch is the odd one out: instead of web-searching a topic, it
+# renders the pages in config/watch_targets.json with Playwright, keeps a
+# snapshot of each on the unified `auto-research-state` orphan branch (so main's
+# history stays clean), and summarises the diff when one changes (e.g. Hacker News).
+#
+# Works out of the box: after "Use this template", enable Actions and add ONE
+# secret (CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY). With no key yet, every
+# job still succeeds and prints a note telling you what to add.
+#
+# Engine: Claude is the MAIN and OpenAI Codex is the SUB. Every LLM step runs
+# through the local composite action .github/actions/agent, which uses Claude
+# (anthropics/claude-code-action) whenever a Claude credential is present, and
+# falls back to Codex (openai/codex-action) ONLY when there is no Claude
+# credential but OPENAI_API_KEY (or CODEX_ACCESS_TOKEN) is set. Either engine
+# returns the same schema-shaped `structured_output`, so the deterministic Python
+# publishers are unchanged. OPENAI_API_KEY is the fully-supported Codex path.
+on:
+  workflow_dispatch: {}
+  schedule:
+    # 19:17 UTC daily == 04:17 JST. Off the top of the hour on purpose. Edit freely.
+    - cron: "17 19 * * *"
+
+# Least privilege: read the repo, open Issues, and fetch an OIDC token
+# (claude-code-action authenticates via OIDC, which needs id-token: write).
+# `pages: read` lets the publishers look up the live GitHub Pages site URL
+# (GET /repos/{owner}/{repo}/pages) so each Slack/email line can link to the item's
+# on-site page; absent or disabled Pages just omits that link.
+permissions:
+  contents: read
+  issues: write
+  id-token: write
+  pages: read
+
+# Avoid overlapping runs (manual + schedule).
+concurrency:
+  group: auto-research
+  cancel-in-progress: false
+
+jobs:
+  # ===========================================================================
+  # SELECT DOMAIN  (which lens + language this run uses)
+  # ===========================================================================
+  # Auto Research can cover any ONE of several DOMAINS — research / tech /
+  # business / hobby / finance — each described by a plain Markdown guide under
+  # config/domains/. This job decides the run's domain + language; the three
+  # section jobs below consume that choice (needs: select) so they all share it.
+  #
+  # The choice is STICKY per topic: select_domain.py hashes the effective topic
+  # and remembers {domain, lang} for that hash on the unified `auto-research-state`
+  # orphan branch, so the pick only changes when the topic changes (or you pin it
+  # with the RESEARCH_DOMAIN / OUTPUT_LANGUAGE Variables). The small Claude picker
+  # step runs ONLY when a fresh choice is needed — otherwise the remembered one is
+  # reused, and with no Claude key it falls back to a sensible default.
+  select:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # push the remembered choice to the state branch
+      id-token: write   # claude-code-action authenticates via OIDC
+    env:
+      STATE_BRANCH: auto-research-state
+      STATE_FILE: selection.json
+      # The AI-designed site look (title / tagline / brand colour), sticky per
+      # topic on the SAME state branch — generated once, reused thereafter.
+      SITE_STATE_FILE: site_config.json
+    outputs:
+      domain: ${{ steps.finalize.outputs.domain }}
+      lang: ${{ steps.finalize.outputs.lang }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Check for an LLM credential
+        id: preflight
+        env:
+          A: ${{ secrets.ANTHROPIC_API_KEY }}
+          O: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          P: ${{ secrets.OPENAI_API_KEY }}
+          T: ${{ secrets.CODEX_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$A" ] || [ -n "$O" ] || [ -n "$P" ] || [ -n "$T" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Auto Research::No LLM credential yet — the domain picker is skipped; this run uses the remembered or default domain. Add CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY (Claude, the main), or OPENAI_API_KEY (Codex, the sub), to enable it."
+          fi
+
+      - name: Restore the remembered choice + site look from the state branch
+        run: bash scripts/restore_state.sh "$STATE_BRANCH" "$STATE_FILE" "$SITE_STATE_FILE"
+
+      - name: Decide whether a fresh pick is needed (Python)
+        id: prepare
+        env:
+          RESEARCH_TOPIC: ${{ vars.RESEARCH_TOPIC }}
+          RESEARCH_DOMAIN: ${{ vars.RESEARCH_DOMAIN }}
+          OUTPUT_LANGUAGE: ${{ vars.OUTPUT_LANGUAGE || secrets.OUTPUT_LANGUAGE }}
+        run: python3 scripts/select_domain.py prepare
+
+      - name: Pick the domain + language (Claude → Codex)
+        id: pick
+        # A picker failure must not block the run — finalize then falls back to the
+        # remembered choice or the default domain/language.
+        continue-on-error: true
+        if: ${{ steps.preflight.outputs.has_key == 'true' && (steps.prepare.outputs.need_pick == 'true' || steps.prepare.outputs.need_lang == 'true') }}
+        uses: ./.github/actions/agent
+        with:
+          allowed-tools: Read
+          max-turns: "10"
+          web-search: "false"
+          anthropic-model: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+          openai-model: ${{ vars.OPENAI_MODEL }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-access-token: ${{ secrets.CODEX_ACCESS_TOKEN }}
+          json-schema: '{"type":"object","additionalProperties":false,"properties":{"domain":{"type":"string","enum":["research","tech","business","hobby","finance"]},"lang":{"type":"string","enum":["en","ja"]}},"required":["domain","lang"]}'
+          prompt: |
+            Choose ONE research domain for today's run, and the language to write in.
+
+            Use the Read tool to read `.auto_state/menu.md` (it shows the effective
+            research topic and the domain menu) and `config/domains/index.md`. Also
+            read `config/research_topics.md` for the lab's focus and notes. Then pick
+            the single domain whose lens best fits the topic — one of: research, tech,
+            business, hobby, finance.
+
+            For the language: if the topic and its likely audience clearly imply one,
+            choose it; otherwise default to en. Allowed values: en, ja.
+
+            Return ONLY the JSON object required by the schema.
+
+      - name: Finalise + remember the choice (Python)
+        id: finalize
+        env:
+          SECTION_JSON: ${{ steps.pick.outputs.structured_output }}
+          RESEARCH_TOPIC: ${{ vars.RESEARCH_TOPIC }}
+          RESEARCH_DOMAIN: ${{ vars.RESEARCH_DOMAIN }}
+          OUTPUT_LANGUAGE: ${{ vars.OUTPUT_LANGUAGE || secrets.OUTPUT_LANGUAGE }}
+        run: python3 scripts/select_domain.py finalize
+
+      # -- Site look (title / tagline / brand colour) ------------------------
+      # The published site's presentation is ALSO chosen once per topic by a tiny
+      # agent step and remembered on the SAME state branch. The publish-site
+      # workflow restores it and paints the Astro build with it. Same sticky
+      # pattern: design only when none is remembered yet (need_pick), else reuse.
+      - name: Decide whether the site needs a look designed (Python)
+        id: site_prepare
+        env:
+          RESEARCH_TOPIC: ${{ vars.RESEARCH_TOPIC }}
+          OUTPUT_LANGUAGE: ${{ steps.finalize.outputs.lang }}
+          RESEARCH_DOMAIN: ${{ steps.finalize.outputs.domain }}
+        run: python3 scripts/site_config.py prepare
+
+      - name: Design the site look — title, tagline, brand colour (Claude → Codex)
+        id: site_pick
+        # A design failure must not block the run — finalize then keeps the
+        # remembered look or the shipped default.
+        continue-on-error: true
+        if: ${{ steps.preflight.outputs.has_key == 'true' && steps.site_prepare.outputs.need_pick == 'true' }}
+        uses: ./.github/actions/agent
+        with:
+          allowed-tools: Read
+          max-turns: "10"
+          web-search: "false"
+          anthropic-model: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+          openai-model: ${{ vars.OPENAI_MODEL }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-access-token: ${{ secrets.CODEX_ACCESS_TOKEN }}
+          json-schema: '{"type":"object","additionalProperties":false,"properties":{"site_title":{"type":"string"},"tagline":{"type":"string"},"brand_color":{"type":"string"}},"required":["site_title","tagline","brand_color"]}'
+          prompt: |
+            Design the look of this lab's published findings site.
+
+            Use the Read tool to read `.auto_state/site_brief.md` — it gives the
+            research topic, the language to write the text in, the domain (lens),
+            and exactly which fields to choose. Also read
+            `config/research_topics.md` for extra context on the lab's focus.
+
+            Then return:
+            - site_title: a short, memorable site name (2-4 words, NOT a sentence)
+              in the brief's language.
+            - tagline: one short hero sentence (<= ~12 words) in that language.
+            - brand_color: ONE brand colour as a `#rrggbb` hex string — the single
+              voltage every link / button / active state is painted with. Choose a
+              confident, accessible colour fitting the topic's mood; avoid
+              near-white and near-black so it reads on both light and dark themes.
+
+            Return ONLY the JSON object required by the schema.
+
+      - name: Finalise + remember the site look (Python)
+        id: site_finalize
+        env:
+          SECTION_JSON: ${{ steps.site_pick.outputs.structured_output }}
+          RESEARCH_TOPIC: ${{ vars.RESEARCH_TOPIC }}
+          OUTPUT_LANGUAGE: ${{ steps.finalize.outputs.lang }}
+        run: python3 scripts/site_config.py finalize
+
+      - name: Save the remembered choice + site look to the state branch
+        if: ${{ always() }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/save_state.sh "$STATE_BRANCH" "$STATE_FILE" "$SITE_STATE_FILE"
+
+  # ===========================================================================
+  # RESEARCH NEWS  (Layer 2 — the latest developments in the chosen domain)
+  # ===========================================================================
+  news:
+    needs: select
+    if: ${{ vars.ENABLE_RESEARCH_NEWS != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Check for an LLM credential
+        id: preflight
+        env:
+          A: ${{ secrets.ANTHROPIC_API_KEY }}
+          O: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          P: ${{ secrets.OPENAI_API_KEY }}
+          T: ${{ secrets.CODEX_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$A" ] || [ -n "$O" ] || [ -n "$P" ] || [ -n "$T" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Auto Research::No LLM credential yet. Add CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY (Claude, the main), or OPENAI_API_KEY (Codex, the sub), under Settings -> Secrets and variables -> Actions to enable research. Skipping for now."
+          fi
+
+      - name: Summarise already-published issues (Python)
+        if: ${{ steps.preflight.outputs.has_key == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT_LANGUAGE: ${{ needs.select.outputs.lang }}
+          GOOD_LABELS: ${{ vars.GOOD_LABELS }}
+          BAD_LABELS: ${{ vars.BAD_LABELS }}
+          EXISTING_CONTEXT_MAX: ${{ vars.EXISTING_CONTEXT_MAX }}
+        run: python3 scripts/existing_context.py news .research_context/news.md
+
+      - name: Research — latest news (Claude → Codex)
+        id: research
+        if: ${{ steps.preflight.outputs.has_key == 'true' }}
+        uses: ./.github/actions/agent
+        with:
+          allowed-tools: WebSearch,WebFetch,Read
+          max-turns: "30"
+          web-search: "true"
+          anthropic-model: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+          openai-model: ${{ vars.OPENAI_MODEL }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-access-token: ${{ secrets.CODEX_ACCESS_TOKEN }}
+          json-schema: '{"type":"object","additionalProperties":false,"properties":{"items":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"title":{"type":"string"},"url":{"type":"string"},"source":{"type":"string"},"date":{"type":"string"},"takeaway":{"type":"string"}},"required":["title","url","takeaway"]}}},"required":["items"]}'
+          prompt: |
+            DOMAIN: this run covers the **${{ needs.select.outputs.domain }}** domain.
+            FIRST use the Read tool to read
+            `config/domains/${{ needs.select.outputs.domain }}.${{ needs.select.outputs.lang }}.md`
+            and follow its guidance on sources, tone, and what counts as a good item
+            in this domain. You are producing the **Latest** layer — the recent,
+            concrete developments (Layer 2 of that guide).
+
+            You are a research assistant. Using the WebSearch tool, find RECENT,
+            REAL news, papers, and releases about the topic below. Prefer the sources
+            your domain guide names.
+
+            FIRST, use the Read tool to read `.research_context/news.md`. It lists
+            items ALREADY published in previous runs. Do NOT propose anything that
+            duplicates those — surface only genuinely NEW items not listed there.
+            If the file is missing or empty, just research freely.
+
+            ALSO read `config/priority_sources.md`. It lists URLs the lab trusts
+            most. Use WebFetch to crawl those URLs FIRST (and follow the specific
+            item links you find on them) before falling back to open-ended
+            WebSearch. Treat them as priorities, not a whitelist — after using
+            them, WebSearch freely for anything else new and relevant.
+
+            Topic: "${{ vars.RESEARCH_TOPIC || 'AI' }}"
+            (Defaults to "AI" when unset. Also read config/research_topics.md for
+            extra context and to refine the focus.)
+
+            Collect about ${{ vars.ITEMS_PER_REPORT || '5' }} concrete items (a few
+            more or fewer is fine). For each: a real title, a working URL you
+            actually opened, the source/venue, an approximate date, and a one-line
+            takeaway. NEVER invent papers, authors, dates, or URLs — include only
+            what you genuinely found. Write the title and takeaway fields in this
+            language: ${{ needs.select.outputs.lang }} (en=English, ja=日本語).
+
+            Return ONLY the JSON object required by the schema.
+
+      - name: Publish — news issue (Python)
+        if: ${{ steps.research.outputs.structured_output != '' }}
+        env:
+          SECTION_JSON: ${{ steps.research.outputs.structured_output }}
+          OUTPUT_LANGUAGE: ${{ needs.select.outputs.lang }}
+          RESEARCH_TOPIC: ${{ vars.RESEARCH_TOPIC || 'AI' }}
+          GITHUB_ISSUE_LABELS: ${{ vars.GITHUB_ISSUE_LABELS || 'auto-research' }},domain:${{ needs.select.outputs.domain }}
+          ENABLE_GITHUB_ISSUE: ${{ vars.ENABLE_GITHUB_ISSUE }}
+          ENABLE_FILE_OUTPUT: ${{ vars.ENABLE_FILE_OUTPUT }}
+          SLACK_DIGEST: ${{ vars.SLACK_DIGEST }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ vars.EMAIL_TO || secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM || secrets.EMAIL_FROM }}
+          EMAIL_SUBJECT_PREFIX: ${{ vars.EMAIL_SUBJECT_PREFIX }}
+          # When combining is on (default), spool Slack/email here instead of
+          # sending now; the final `notify` job folds every section into ONE send.
+          NOTIFY_SPOOL_DIR: ${{ vars.COMBINE_NOTIFICATIONS != 'false' && '.notify' || '' }}
+        run: python3 scripts/publish_section.py news
+
+      - name: Upload notification spool
+        if: ${{ always() && vars.COMBINE_NOTIFICATIONS != 'false' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: notify-news
+          path: .notify/
+          if-no-files-found: ignore
+          # `.notify` is a hidden dir; upload-artifact@v4+ excludes hidden files
+          # by default, which would silently drop the spool and skip the send.
+          include-hidden-files: true
+
+      - name: Upload file output
+        if: ${{ always() && vars.ENABLE_FILE_OUTPUT == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: auto-research-news
+          path: outputs/
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # HYPOTHESES  (Layer 3 — takes / interpretations in the chosen domain)
+  # ===========================================================================
+  hypotheses:
+    needs: select
+    if: ${{ vars.ENABLE_HYPOTHESIS_GENERATION != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Check for an LLM credential
+        id: preflight
+        env:
+          A: ${{ secrets.ANTHROPIC_API_KEY }}
+          O: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          P: ${{ secrets.OPENAI_API_KEY }}
+          T: ${{ secrets.CODEX_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$A" ] || [ -n "$O" ] || [ -n "$P" ] || [ -n "$T" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Auto Research::No LLM credential yet. Add CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY (Claude, the main), or OPENAI_API_KEY (Codex, the sub), under Settings -> Secrets and variables -> Actions to enable research. Skipping for now."
+          fi
+
+      - name: Summarise already-published issues (Python)
+        if: ${{ steps.preflight.outputs.has_key == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT_LANGUAGE: ${{ needs.select.outputs.lang }}
+          GOOD_LABELS: ${{ vars.GOOD_LABELS }}
+          BAD_LABELS: ${{ vars.BAD_LABELS }}
+          EXISTING_CONTEXT_MAX: ${{ vars.EXISTING_CONTEXT_MAX }}
+        run: python3 scripts/existing_context.py hypotheses .research_context/hypotheses.md
+
+      - name: Research — hypotheses (Claude → Codex)
+        id: research
+        if: ${{ steps.preflight.outputs.has_key == 'true' }}
+        uses: ./.github/actions/agent
+        with:
+          allowed-tools: WebSearch,WebFetch,Read
+          max-turns: "30"
+          web-search: "true"
+          anthropic-model: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+          openai-model: ${{ vars.OPENAI_MODEL }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-access-token: ${{ secrets.CODEX_ACCESS_TOKEN }}
+          json-schema: '{"type":"object","additionalProperties":false,"properties":{"hypotheses":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"statement":{"type":"string"},"rationale":{"type":"string"},"experiment":{"type":"string"},"risk":{"type":"string"},"citation_title":{"type":"string"},"citation_url":{"type":"string"}},"required":["statement","rationale","experiment"]}}},"required":["hypotheses"]}'
+          prompt: |
+            DOMAIN: this run covers the **${{ needs.select.outputs.domain }}** domain.
+            FIRST use the Read tool to read
+            `config/domains/${{ needs.select.outputs.domain }}.${{ needs.select.outputs.lang }}.md`
+            and follow its guidance on sources, tone, and what counts as a good item
+            in this domain. You are producing the **Takes** layer — the *thinking*
+            layer: domain-appropriate IDEAS and testable views about the topic
+            (Layer 3 of that guide). Follow the domain guide for what kind of idea
+            fits — e.g. a business idea, something to build, an investment/research
+            thesis, a project to try. In non-research domains read "hypothesis"
+            loosely as an idea/thesis/claim, "experiment" as how to try, validate,
+            or what to watch, and "risk" as the main caveat.
+
+            You are helping brainstorm. First read config/research_topics.md and
+            config/prompts/hypothesis_generation.md for context. Using the WebSearch
+            tool to ground yourself in recent real work, propose about
+            ${{ vars.ITEMS_PER_REPORT || '5' }} concrete, testable ideas/hypotheses
+            (a few more or fewer is fine) about the topic below, in the form the
+            domain guide's Takes layer describes.
+
+            FIRST, use the Read tool to read `.research_context/hypotheses.md`. It
+            lists hypotheses ALREADY published in previous runs. Do NOT repeat or
+            trivially reword those — propose only genuinely NEW hypotheses. If the
+            file is missing or empty, just brainstorm freely.
+
+            ALSO read `config/priority_sources.md`. It lists URLs the lab trusts
+            most. Use WebFetch to crawl those URLs FIRST (and follow the specific
+            item links you find on them) to ground yourself before falling back to
+            open-ended WebSearch. Treat them as priorities, not a whitelist.
+
+            Topic: "${{ vars.RESEARCH_TOPIC || 'AI' }}"
+            (Defaults to "AI" when unset; config/research_topics.md adds context.)
+
+            For each hypothesis: a single falsifiable statement, the rationale
+            (1-2 sentences), one experiment/observation that would test it, the
+            main risk or confound, and — only if you actually found a relevant
+            real paper — a citation title and URL. NEVER invent citations; leave
+            them blank if unsure. Write the text fields in this language:
+            ${{ needs.select.outputs.lang }} (en=English, ja=日本語).
+
+            Return ONLY the JSON object required by the schema.
+
+      - name: Publish — hypotheses issue (Python)
+        if: ${{ steps.research.outputs.structured_output != '' }}
+        env:
+          SECTION_JSON: ${{ steps.research.outputs.structured_output }}
+          OUTPUT_LANGUAGE: ${{ needs.select.outputs.lang }}
+          RESEARCH_TOPIC: ${{ vars.RESEARCH_TOPIC || 'AI' }}
+          GITHUB_ISSUE_LABELS: ${{ vars.GITHUB_ISSUE_LABELS || 'auto-research' }},domain:${{ needs.select.outputs.domain }}
+          ENABLE_GITHUB_ISSUE: ${{ vars.ENABLE_GITHUB_ISSUE }}
+          ENABLE_FILE_OUTPUT: ${{ vars.ENABLE_FILE_OUTPUT }}
+          SLACK_DIGEST: ${{ vars.SLACK_DIGEST }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ vars.EMAIL_TO || secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM || secrets.EMAIL_FROM }}
+          EMAIL_SUBJECT_PREFIX: ${{ vars.EMAIL_SUBJECT_PREFIX }}
+          # When combining is on (default), spool Slack/email here instead of
+          # sending now; the final `notify` job folds every section into ONE send.
+          NOTIFY_SPOOL_DIR: ${{ vars.COMBINE_NOTIFICATIONS != 'false' && '.notify' || '' }}
+        run: python3 scripts/publish_section.py hypotheses
+
+      - name: Upload notification spool
+        if: ${{ always() && vars.COMBINE_NOTIFICATIONS != 'false' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: notify-hypotheses
+          path: .notify/
+          if-no-files-found: ignore
+          # `.notify` is a hidden dir; upload-artifact@v4+ excludes hidden files
+          # by default, which would silently drop the spool and skip the send.
+          include-hidden-files: true
+
+      - name: Upload file output
+        if: ${{ always() && vars.ENABLE_FILE_OUTPUT == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: auto-research-hypotheses
+          path: outputs/
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # RELATED WORK  (Layer 1 — foundations / unwavering facts in the chosen domain)
+  # ===========================================================================
+  related:
+    needs: select
+    if: ${{ vars.ENABLE_RELATED_WORK != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Check for an LLM credential
+        id: preflight
+        env:
+          A: ${{ secrets.ANTHROPIC_API_KEY }}
+          O: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          P: ${{ secrets.OPENAI_API_KEY }}
+          T: ${{ secrets.CODEX_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$A" ] || [ -n "$O" ] || [ -n "$P" ] || [ -n "$T" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Auto Research::No LLM credential yet. Add CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY (Claude, the main), or OPENAI_API_KEY (Codex, the sub), under Settings -> Secrets and variables -> Actions to enable research. Skipping for now."
+          fi
+
+      - name: Summarise already-published issues (Python)
+        if: ${{ steps.preflight.outputs.has_key == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT_LANGUAGE: ${{ needs.select.outputs.lang }}
+          GOOD_LABELS: ${{ vars.GOOD_LABELS }}
+          BAD_LABELS: ${{ vars.BAD_LABELS }}
+          EXISTING_CONTEXT_MAX: ${{ vars.EXISTING_CONTEXT_MAX }}
+        run: python3 scripts/existing_context.py related .research_context/related.md
+
+      - name: Research — related work (Claude → Codex)
+        id: research
+        if: ${{ steps.preflight.outputs.has_key == 'true' }}
+        uses: ./.github/actions/agent
+        with:
+          allowed-tools: WebSearch,WebFetch,Read
+          max-turns: "30"
+          web-search: "true"
+          anthropic-model: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+          openai-model: ${{ vars.OPENAI_MODEL }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-access-token: ${{ secrets.CODEX_ACCESS_TOKEN }}
+          json-schema: '{"type":"object","additionalProperties":false,"properties":{"themes":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string"},"summary":{"type":"string"},"papers":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"title":{"type":"string"},"url":{"type":"string"},"note":{"type":"string"}},"required":["title"]}}},"required":["name","summary"]}},"open_gaps":{"type":"array","items":{"type":"string"}}},"required":["themes","open_gaps"]}'
+          prompt: |
+            DOMAIN: this run covers the **${{ needs.select.outputs.domain }}** domain.
+            FIRST use the Read tool to read
+            `config/domains/${{ needs.select.outputs.domain }}.${{ needs.select.outputs.lang }}.md`
+            and follow its guidance on sources, tone, and what counts as a good item
+            in this domain. You are producing the **Foundations** layer — the
+            established, slow-moving facts and key references (Layer 1 of that guide).
+            In non-research domains read "papers" loosely as authoritative sources or
+            references.
+
+            You are organising the foundations for this domain. First read
+            config/research_topics.md and config/prompts/related_work.md for
+            context. Using the WebSearch tool to find real, authoritative work, build
+            a structured survey of the topic below.
+
+            FIRST, use the Read tool to read `.research_context/related.md`. It
+            lists themes and papers ALREADY published in previous runs. Do NOT
+            duplicate them — extend coverage with NEW themes, papers, and gaps not
+            listed there. If the file is missing or empty, just survey freely.
+
+            ALSO read `config/priority_sources.md`. It lists URLs the lab trusts
+            most. Use WebFetch to crawl those URLs FIRST (and follow the specific
+            paper links you find on them) before falling back to open-ended
+            WebSearch. Treat them as priorities, not a whitelist.
+
+            Topic: "${{ vars.RESEARCH_TOPIC || 'AI' }}"
+            (Defaults to "AI" when unset; config/research_topics.md adds context.)
+
+            Group the work into 2-4 themes. Each theme has a name, a short summary
+            of what those approaches contribute, and real papers (title, a URL you
+            actually opened, and a one-line note) — aim for about
+            ${{ vars.ITEMS_PER_REPORT || '5' }} papers in total across the themes (a
+            few more or fewer is fine). Finish with 2-4 "open gaps".
+            NEVER invent paper titles, authors, or URLs — include only what you
+            genuinely found; describe a type of work generically if unsure. Write
+            the text fields in this language:
+            ${{ needs.select.outputs.lang }} (en=English, ja=日本語).
+
+            Return ONLY the JSON object required by the schema.
+
+      - name: Publish — related-work issue (Python)
+        if: ${{ steps.research.outputs.structured_output != '' }}
+        env:
+          SECTION_JSON: ${{ steps.research.outputs.structured_output }}
+          OUTPUT_LANGUAGE: ${{ needs.select.outputs.lang }}
+          RESEARCH_TOPIC: ${{ vars.RESEARCH_TOPIC || 'AI' }}
+          GITHUB_ISSUE_LABELS: ${{ vars.GITHUB_ISSUE_LABELS || 'auto-research' }},domain:${{ needs.select.outputs.domain }}
+          ENABLE_GITHUB_ISSUE: ${{ vars.ENABLE_GITHUB_ISSUE }}
+          ENABLE_FILE_OUTPUT: ${{ vars.ENABLE_FILE_OUTPUT }}
+          SLACK_DIGEST: ${{ vars.SLACK_DIGEST }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ vars.EMAIL_TO || secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM || secrets.EMAIL_FROM }}
+          EMAIL_SUBJECT_PREFIX: ${{ vars.EMAIL_SUBJECT_PREFIX }}
+          # When combining is on (default), spool Slack/email here instead of
+          # sending now; the final `notify` job folds every section into ONE send.
+          NOTIFY_SPOOL_DIR: ${{ vars.COMBINE_NOTIFICATIONS != 'false' && '.notify' || '' }}
+        run: python3 scripts/publish_section.py related
+
+      - name: Upload notification spool
+        if: ${{ always() && vars.COMBINE_NOTIFICATIONS != 'false' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: notify-related
+          path: .notify/
+          if-no-files-found: ignore
+          # `.notify` is a hidden dir; upload-artifact@v4+ excludes hidden files
+          # by default, which would silently drop the spool and skip the send.
+          include-hidden-files: true
+
+      - name: Upload file output
+        if: ${{ always() && vars.ENABLE_FILE_OUTPUT == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: auto-research-related
+          path: outputs/
+          if-no-files-found: ignore
+
+  # ===========================================================================
+  # SITE WATCH  (Playwright page-diff watcher)
+  # ===========================================================================
+  # The same two-halves split, applied to watching web pages for changes (e.g.
+  # the Hacker News front page). A Python step renders each page in
+  # config/watch_targets.json with Playwright and diffs it against a snapshot
+  # baseline kept on the unified `auto-research-state` orphan branch (deterministic).
+  # ONLY when a page changed, the Claude Code Action reads the diff and returns a
+  # JSON summary; a Python publisher files one Issue (+ Slack) per changed page, and
+  # the job saves the refreshed snapshots back to that state branch — NOT main —
+  # so the next run diffs against the latest state without touching main's history.
+  watch:
+    needs: select
+    if: ${{ vars.ENABLE_SITE_WATCH != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # This job alone needs contents: write, to push the refreshed snapshots to
+    # the `auto-research-state` orphan branch (main's history is never touched).
+    permissions:
+      contents: write
+      issues: write
+      id-token: write
+      pages: read   # look up the live GitHub Pages URL for the on-site item link
+    # The unified orphan branch that holds ALL cross-run state — the Playwright
+    # snapshot baselines (here) and the domain selection (the select job). Site
+    # Watch only ever touches the snapshots/ path on it.
+    env:
+      STATE_BRANCH: auto-research-state
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Check for an LLM credential
+        id: preflight
+        env:
+          A: ${{ secrets.ANTHROPIC_API_KEY }}
+          O: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          P: ${{ secrets.OPENAI_API_KEY }}
+          T: ${{ secrets.CODEX_ACCESS_TOKEN }}
+        run: |
+          if [ -n "$A" ] || [ -n "$O" ] || [ -n "$P" ] || [ -n "$T" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Site Watch::No LLM credential yet. Snapshots are still saved, but change summaries are skipped. Add CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY (Claude, the main), or OPENAI_API_KEY (Codex, the sub), under Settings -> Secrets and variables -> Actions to enable summaries."
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Playwright + Chromium
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install playwright
+          python3 -m playwright install --with-deps chromium
+
+      - name: Restore snapshot baselines from the state branch
+        # Snapshots live on the unified `auto-research-state` orphan branch, not
+        # main. Pull last run's baselines into snapshots/ so watch_fetch.py can diff
+        # against them. First run ever: no branch yet, so nothing is restored and
+        # watch_fetch.py just captures fresh baselines and files nothing.
+        run: bash scripts/restore_state.sh "$STATE_BRANCH" snapshots
+
+      - name: Fetch & diff watched pages (Playwright)
+        id: watch
+        env:
+          WATCH_TIMEOUT_MS: ${{ vars.WATCH_TIMEOUT_MS }}
+          WATCH_MAX_DIFF: ${{ vars.WATCH_MAX_DIFF }}
+        run: python3 scripts/watch_fetch.py
+
+      - name: Summarise the diffs (Claude → Codex)
+        id: summary
+        if: ${{ steps.preflight.outputs.has_key == 'true' && steps.watch.outputs.changed == 'true' }}
+        uses: ./.github/actions/agent
+        with:
+          allowed-tools: Read,WebFetch
+          max-turns: "30"
+          web-search: "true"
+          anthropic-model: ${{ vars.ANTHROPIC_MODEL || 'claude-sonnet-4-6' }}
+          openai-model: ${{ vars.OPENAI_MODEL }}
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-access-token: ${{ secrets.CODEX_ACCESS_TOKEN }}
+          json-schema: '{"type":"object","additionalProperties":false,"properties":{"pages":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"slug":{"type":"string"},"headline":{"type":"string"},"summary":{"type":"string"},"changes":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"title":{"type":"string"},"detail":{"type":"string"},"url":{"type":"string"}},"required":["title"]}},"no_meaningful_change":{"type":"boolean"}},"required":["slug","headline","summary","changes"]}}},"required":["pages"]}'
+          prompt: |
+            One or more web pages this lab watches have CHANGED since the last
+            check. Your job is to explain what changed, for a reader who has not
+            opened them.
+
+            Use the Read tool to read `.watch_diffs/changes.md`. It contains one
+            section per changed page — each with the page's `slug`, `url`, and a
+            unified diff of its rendered text (lines starting with `+` are NEW,
+            `-` were REMOVED). Also read `config/prompts/watch_summary.md` for
+            guidance on what matters.
+
+            Return one entry in "pages" PER changed page. Copy the `slug` exactly
+            from that page's section so it can be matched back. For each page write
+            a short headline, a 1-3 sentence summary, and a list of the most
+            notable individual changes (new stories / posts / releases / removed
+            items) — each with a concise title and an optional one-line detail. If
+            a page's diff is only noise — vote counts, timestamps, comment tallies,
+            reordering with no new content — set its "no_meaningful_change" to true
+            and leave its "changes" empty.
+
+            You MAY use WebFetch to open a specific new link to add its real URL or
+            a one-line description, but do NOT invent URLs — include only links you
+            actually saw in the diff or opened. Write the text fields in this
+            language: ${{ needs.select.outputs.lang }} (en=English, ja=日本語).
+
+            Return ONLY the JSON object required by the schema.
+
+      - name: Publish — site-watch issues (Python)
+        id: publish
+        if: ${{ steps.summary.outputs.structured_output != '' }}
+        env:
+          SECTION_JSON: ${{ steps.summary.outputs.structured_output }}
+          OUTPUT_LANGUAGE: ${{ needs.select.outputs.lang }}
+          GITHUB_ISSUE_LABELS: ${{ vars.GITHUB_ISSUE_LABELS || 'auto-research' }}
+          ENABLE_GITHUB_ISSUE: ${{ vars.ENABLE_GITHUB_ISSUE }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ vars.EMAIL_TO || secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM || secrets.EMAIL_FROM }}
+          EMAIL_SUBJECT_PREFIX: ${{ vars.EMAIL_SUBJECT_PREFIX }}
+          # When combining is on (default), spool Slack/email here instead of
+          # sending now; the final `notify` job folds every section into ONE send.
+          NOTIFY_SPOOL_DIR: ${{ vars.COMBINE_NOTIFICATIONS != 'false' && '.notify' || '' }}
+        run: python3 scripts/publish_watch.py
+
+      - name: Upload notification spool
+        if: ${{ always() && vars.COMBINE_NOTIFICATIONS != 'false' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: notify-watch
+          path: .notify/
+          if-no-files-found: ignore
+          # `.notify` is a hidden dir; upload-artifact@v4+ excludes hidden files
+          # by default, which would silently drop the spool and skip the send.
+          include-hidden-files: true
+
+      - name: Save refreshed snapshots to the state branch
+        # Advance the baseline ONLY when this run actually handled the changes:
+        # the fetch succeeded AND neither the summary nor the publish step
+        # FAILED. (`!= 'failure'` lets through 'success' and 'skipped' — so
+        # no-change runs and the documented keyless-template path still persist
+        # baselines, while a failed summary/publish leaves the old baseline in
+        # place so the next run re-diffs and re-files the change instead of
+        # losing it.)
+        if: >-
+          ${{ always()
+              && steps.watch.outcome == 'success'
+              && steps.summary.outcome != 'failure'
+              && steps.publish.outcome != 'failure' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Commit the refreshed snapshots/ to the unified `auto-research-state`
+        # orphan branch via a throwaway worktree, so main's history is never
+        # touched. save_state.sh saves ONLY the snapshots/ path; this job
+        # `needs: select`, so the select job's selection.json push has already
+        # landed and this commit layers cleanly on top (disjoint paths). The
+        # retry-on-lost-push in save_state.sh stays as defence against any other
+        # writer to the same branch.
+        run: bash scripts/save_state.sh "$STATE_BRANCH" snapshots
+
+  # ===========================================================================
+  # NOTIFY  (one combined Slack post + one email for the whole run)
+  # ===========================================================================
+  # The four section jobs above run in parallel and would each fire their own
+  # Slack post and email — up to four of each per run. Instead, when combining is
+  # on (the default; pin COMBINE_NOTIFICATIONS=false to go back to per-section
+  # sends), each section SPOOLS its Slack/email blocks to a `.notify/` directory
+  # and uploads it as a `notify-<section>` artifact rather than sending. This
+  # final job — after every section, `if: always()` so it still runs when some
+  # were skipped or failed — downloads all those spools, folds them into ONE
+  # Slack post and ONE email (ordered Latest → Takes → Foundations → Site Watch),
+  # and sends once. Deterministic; no LLM and no Issue/GitHub writes.
+  notify:
+    needs: [select, news, hypotheses, related, watch]
+    if: ${{ always() && vars.COMBINE_NOTIFICATIONS != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download every section's notification spool
+        uses: actions/download-artifact@v6
+        with:
+          # Merge all `notify-<section>` artifacts into one `.notify/` directory.
+          # A pattern with zero matches (all sections skipped / no items) just
+          # downloads nothing — the script then sends nothing and succeeds.
+          pattern: notify-*
+          path: .notify
+          merge-multiple: true
+
+      - name: Send one combined Slack post + email (Python)
+        env:
+          NOTIFY_SPOOL_DIR: .notify
+          OUTPUT_LANGUAGE: ${{ needs.select.outputs.lang }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ vars.EMAIL_TO || secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM || secrets.EMAIL_FROM }}
+          EMAIL_SUBJECT_PREFIX: ${{ vars.EMAIL_SUBJECT_PREFIX }}
+        run: python3 scripts/notify_combined.py

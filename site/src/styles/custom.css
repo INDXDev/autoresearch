@@ -1,0 +1,822 @@
+/* Auto Research — "Dispatch", Coinbase-grade enterprise curation theme.
+
+   The Python exporter (scripts/build_site.py) emits the card/page markup; these
+   rules theme it after Coinbase's marketing system: a quiet white (or deep
+   near-black) editorial canvas, ONE brand voltage — Coinbase Blue #0052ff — used
+   scarcely on every CTA / link / active state, Inter for display + body, and
+   JetBrains Mono for every tabular number. Pill geometry for interactive things,
+   24px radius for cards, full circles for dots. No second brand color: the
+   per-section hues (blue/orange/purple/teal) survive ONLY as small category
+   indicators (a thin rail, a dot, the kicker) — never as fills or buttons.
+
+   Layers:
+     1. Fonts + radii/spacing tokens
+     2. Palette — Coinbase Blue + surfaces, per light/dark theme
+     3. Global typography + nav
+     4. Hero (full-bleed dark editorial band)
+     5. Home — stat strip, browse-by-section cards, run list, reaction strip
+     6. Listing cards (runs / sections / tags / reactions)
+     7. Item detail page + comments
+     8. Tags, chips, GitHub buttons
+     9. Motion + responsive
+*/
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* =========================================================================
+   1. Radii + spacing tokens (theme-independent)
+   ========================================================================= */
+
+:root {
+  --ar-radius: 24px;        /* feature cards, mockups (rounded.xl) */
+  --ar-radius-md: 16px;     /* mid cards */
+  --ar-radius-sm: 12px;     /* inputs, compact chips */
+  --ar-pill: 100px;         /* every CTA / badge */
+  --ar-gap: 1.25rem;
+  --ar-section: clamp(2.5rem, 6vw, 4rem);
+
+  --ar-font-display: 'Inter', ui-sans-serif, system-ui, -apple-system,
+    'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic', sans-serif;
+  --ar-font-mono: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', monospace;
+
+  /* The single brand voltage. Same in both themes; the LINK tint shifts. */
+  --ar-blue: #0052ff;
+  --ar-blue-active: #003ecc;
+
+  --sl-font: var(--ar-font-display);
+  --sl-font-mono: var(--ar-font-mono);
+  --sl-nav-height: 4rem;
+}
+
+/* =========================================================================
+   2. Palette — dark (default) then light. Both are genuine Coinbase surfaces:
+      a deep #0a0b0d editorial canvas and the quiet white-canvas marketing look.
+   ========================================================================= */
+
+:root,
+:root[data-theme='dark'] {
+  --ar-canvas: #0a0b0d;
+  --ar-surface: #16181c;          /* elevated card */
+  --ar-surface-soft: #101114;
+  --ar-surface-strong: #1f2228;   /* secondary buttons, chips */
+  --ar-ink: #ffffff;
+  --ar-body: #b3b8c0;
+  --ar-muted: #7c828a;
+  --ar-hairline: #23262d;
+  --ar-hairline-strong: #2f333b;
+  --ar-blue-link: #6f93ff;
+  --ar-up: #2ec28a;
+  --ar-down: #ff5c6c;
+  --ar-shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 32px -20px rgb(0 0 0 / 0.65);
+  --ar-shadow-lg: 0 2px 6px rgb(0 0 0 / 0.5), 0 30px 60px -28px rgb(0 0 0 / 0.75);
+
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #e7e9ec;
+  --sl-color-gray-2: #c2c6cc;
+  --sl-color-gray-3: #a8acb3;
+  --sl-color-gray-4: #5b616e;
+  --sl-color-gray-5: #23262d;
+  --sl-color-gray-6: #16181c;
+  --sl-color-gray-7: #101114;
+  --sl-color-black: #0a0b0d;
+  --sl-color-bg: #0a0b0d;
+  --sl-color-bg-nav: rgb(10 11 13 / 0.82);
+  --sl-color-bg-sidebar: #0a0b0d;
+  --sl-color-hairline: #1c1f25;
+  --sl-color-hairline-shade: #16181c;
+  --sl-color-text: #b3b8c0;
+  --sl-color-text-accent: #6f93ff;
+  --sl-color-accent-low: #0a1c4d;
+  --sl-color-accent: #0052ff;
+  --sl-color-accent-high: #9db8ff;
+}
+
+:root[data-theme='light'] {
+  --ar-canvas: #ffffff;
+  --ar-surface: #ffffff;          /* white feature card + hairline */
+  --ar-surface-soft: #f7f7f7;
+  --ar-surface-strong: #eef0f3;
+  --ar-ink: #0a0b0d;
+  --ar-body: #5b616e;
+  --ar-muted: #7c828a;
+  --ar-hairline: #dee1e6;
+  --ar-hairline-strong: #c9ced6;
+  --ar-blue-link: #0052ff;
+  --ar-up: #05b169;
+  --ar-down: #cf202f;
+  --ar-shadow: 0 1px 2px rgb(10 11 13 / 0.04), 0 10px 28px -18px rgb(10 11 13 / 0.18);
+  --ar-shadow-lg: 0 2px 6px rgb(10 11 13 / 0.06), 0 26px 52px -26px rgb(10 11 13 / 0.22);
+
+  --sl-color-white: #0a0b0d;       /* Starlight's "strongest text" */
+  --sl-color-gray-1: #16181c;
+  --sl-color-gray-2: #3a3f47;
+  --sl-color-gray-3: #5b616e;
+  --sl-color-gray-4: #7c828a;
+  --sl-color-gray-5: #dee1e6;
+  --sl-color-gray-6: #f7f7f7;
+  --sl-color-gray-7: #eef0f3;
+  --sl-color-black: #ffffff;
+  --sl-color-bg: #ffffff;
+  --sl-color-bg-nav: rgb(255 255 255 / 0.85);
+  --sl-color-bg-sidebar: #ffffff;
+  --sl-color-hairline: #dee1e6;
+  --sl-color-hairline-shade: #eef0f3;
+  --sl-color-text: #5b616e;
+  --sl-color-text-accent: #0052ff;
+  --sl-color-accent-low: #d6e0ff;
+  --sl-color-accent: #0052ff;
+  --sl-color-accent-high: #003ecc;
+}
+
+/* =========================================================================
+   3. Global typography + nav
+   ========================================================================= */
+
+body {
+  background: var(--ar-canvas);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* A frosted, hairline-ruled top nav — institutional and quiet. */
+.sl-nav,
+header.header {
+  backdrop-filter: saturate(1.4) blur(12px);
+  border-bottom: 1px solid var(--ar-hairline);
+}
+.site-title {
+  font-family: var(--ar-font-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.sl-markdown-content h1,
+.content-panel h1,
+.hero h1,
+.ar-sec-head,
+.ar-browse-head,
+.ar-all-runs,
+.ar-stat-num,
+.ar-run-date {
+  font-family: var(--ar-font-display);
+  letter-spacing: -0.022em;
+}
+
+.sl-markdown-content h1 {
+  font-weight: 600;
+  font-size: clamp(2rem, 1.4rem + 2.4vw, 2.9rem);
+  line-height: 1.08;
+}
+.sl-markdown-content {
+  --sl-content-width: 50rem;
+}
+
+/* Links inside generated prose pick up the brand-link tint. */
+.ar-body a,
+.ar-comment-body a {
+  color: var(--ar-blue-link);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+.ar-body a:hover,
+.ar-comment-body a:hover {
+  text-decoration: underline;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* =========================================================================
+   4. Hero — the signature full-bleed dark editorial band
+   ========================================================================= */
+
+.hero {
+  position: relative;
+  margin-bottom: var(--ar-section);
+  padding: clamp(2rem, 5vw, 4.25rem);
+  border-radius: var(--ar-radius);
+  background:
+    radial-gradient(60rem 30rem at 88% -20%, rgb(0 82 255 / 0.28), transparent 60%),
+    linear-gradient(180deg, #16181c 0%, #0a0b0d 100%);
+  color: #fff;
+  overflow: hidden;
+  box-shadow: var(--ar-shadow-lg);
+}
+.hero::after {
+  /* a faint product-card-edge highlight, top-left */
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  border: 1px solid rgb(255 255 255 / 0.06);
+  pointer-events: none;
+}
+.hero h1 {
+  font-weight: 600;
+  font-size: clamp(2.4rem, 1.5rem + 3.8vw, 4.2rem);
+  line-height: 1.02;
+  color: #fff;
+}
+.hero .tagline {
+  font-family: var(--ar-font-display);
+  font-weight: 400;
+  font-size: clamp(1.05rem, 0.92rem + 0.7vw, 1.35rem);
+  line-height: 1.5;
+  color: #a8acb3;
+  max-width: 46ch;
+}
+.hero .actions {
+  margin-top: 2rem;
+}
+/* Coinbase-blue pill CTA + an outline-on-dark secondary. */
+.hero .actions a {
+  border-radius: var(--ar-pill);
+  font-family: var(--ar-font-display);
+  font-weight: 600;
+  font-size: 1rem;
+  padding: 0.85rem 1.6rem;
+  border: 1px solid transparent;
+  transition: transform 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+.hero .actions a[data-variant='primary'] {
+  background: var(--ar-blue);
+  color: #fff;
+  box-shadow: 0 12px 30px -12px rgb(0 82 255 / 0.7);
+}
+.hero .actions a[data-variant='primary']:hover {
+  background: var(--ar-blue-active);
+  transform: translateY(-2px);
+}
+.hero .actions a[data-variant='minimal'] {
+  background: transparent;
+  color: #fff;
+  border-color: rgb(255 255 255 / 0.25);
+}
+.hero .actions a[data-variant='minimal']:hover {
+  border-color: #fff;
+  transform: translateY(-2px);
+}
+
+/* =========================================================================
+   5. Home — stat strip, browse cards, run list, reaction strip
+   ========================================================================= */
+
+.ar-browse-head,
+.ar-all-runs {
+  margin: var(--ar-section) 0 1.25rem;
+  font-size: clamp(1.3rem, 1.1rem + 0.8vw, 1.7rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--ar-ink);
+}
+
+.ar-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--ar-gap);
+  margin: 1.5rem 0 0;
+}
+.ar-stat {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 1.4rem 1.5rem;
+  border: 1px solid var(--ar-hairline);
+  border-radius: var(--ar-radius-md);
+  background: var(--ar-surface);
+  box-shadow: var(--ar-shadow);
+  text-decoration: none;
+}
+.ar-stat-link {
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.ar-stat-link::after {
+  content: '→';
+  position: absolute;
+  top: 1.4rem;
+  right: 1.4rem;
+  color: var(--ar-muted);
+  opacity: 0;
+  transform: translateX(-4px);
+  transition: opacity 0.18s ease, transform 0.18s ease, color 0.18s ease;
+}
+.ar-stat-link:hover {
+  transform: translateY(-3px);
+  border-color: color-mix(in srgb, var(--ar-blue) 45%, var(--ar-hairline));
+  box-shadow: var(--ar-shadow-lg);
+}
+.ar-stat-link:hover::after {
+  opacity: 1;
+  transform: translateX(0);
+  color: var(--ar-blue);
+}
+/* The section accent survives only as a thin top rule on its card. */
+.ar-stat-link::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 3px;
+  border-radius: var(--ar-radius-md) var(--ar-radius-md) 0 0;
+  background: var(--ar-accent, var(--ar-blue));
+}
+.ar-stat-num {
+  font-size: 2.1rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--ar-ink);
+  font-variant-numeric: tabular-nums;
+}
+.ar-stat-label {
+  font-family: var(--ar-font-mono);
+  font-size: 0.72rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ar-muted);
+}
+
+.ar-runs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: var(--ar-gap);
+  margin: 1.25rem 0 0;
+}
+.ar-run {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1.4rem 1.5rem;
+  border: 1px solid var(--ar-hairline);
+  border-radius: var(--ar-radius-md);
+  background: var(--ar-surface);
+  box-shadow: var(--ar-shadow);
+  text-decoration: none;
+  transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+.ar-run:hover {
+  border-color: color-mix(in srgb, var(--ar-blue) 45%, var(--ar-hairline));
+  transform: translateY(-3px);
+  box-shadow: var(--ar-shadow-lg);
+}
+.ar-run-date {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--ar-ink);
+  font-variant-numeric: tabular-nums;
+}
+.ar-run-count {
+  font-family: var(--ar-font-mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.04em;
+  color: var(--ar-muted);
+  margin-top: -0.45rem;
+}
+.ar-runbar {
+  display: flex;
+  height: 7px;
+  border-radius: var(--ar-pill);
+  overflow: hidden;
+  background: var(--ar-surface-strong);
+}
+.ar-runseg {
+  height: 100%;
+  min-width: 3px;
+  transition: filter 0.18s ease;
+}
+.ar-run:hover .ar-runseg {
+  filter: brightness(1.12) saturate(1.1);
+}
+.ar-runchips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.ar-runchip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--ar-font-mono);
+  font-size: 0.74rem;
+  color: var(--ar-body);
+}
+.ar-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 9999px;
+  display: inline-block;
+}
+
+/* Browse-by-reaction: a row of quiet pills. */
+.ar-react-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin: 1.25rem 0 0;
+}
+.ar-react-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.95rem;
+  border-radius: var(--ar-pill);
+  background: var(--ar-surface-strong);
+  border: 1px solid var(--ar-hairline);
+  text-decoration: none;
+  transition: border-color 0.16s ease, transform 0.16s ease, background 0.16s ease;
+}
+.ar-react-link:hover {
+  transform: translateY(-2px);
+  border-color: var(--ar-blue);
+  background: color-mix(in srgb, var(--ar-blue) 8%, var(--ar-surface-strong));
+}
+.ar-react-emoji {
+  font-size: 1rem;
+  line-height: 1;
+}
+.ar-react-name {
+  font-family: var(--ar-font-display);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--ar-ink);
+}
+.ar-react-count {
+  font-family: var(--ar-font-mono);
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: var(--ar-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* =========================================================================
+   6. Listing cards (runs / sections / tags / reactions)
+   ========================================================================= */
+
+.ar-sec-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+  padding-bottom: 0.6rem;
+  margin-top: var(--ar-section);
+  border-bottom: 1px solid var(--ar-hairline);
+  position: relative;
+  color: var(--ar-ink);
+}
+.ar-sec-head::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  width: 3.5rem;
+  height: 3px;
+  border-radius: var(--ar-pill);
+  background: var(--ar-accent, var(--ar-blue));
+}
+.ar-count {
+  font-family: var(--ar-font-mono);
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--ar-muted);
+  letter-spacing: 0.02em;
+}
+
+.ar-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--ar-gap);
+  margin: 1.5rem 0;
+}
+@media (min-width: 56rem) {
+  .ar-grid {
+    grid-template-columns: repeat(auto-fill, minmax(22rem, 1fr));
+  }
+}
+
+.ar-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ar-hairline);
+  border-radius: var(--ar-radius);
+  background: var(--ar-surface);
+  box-shadow: var(--ar-shadow);
+  padding: 1.5rem 1.6rem;
+  overflow: hidden;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+/* Thin section-accent rail down the left edge (category indicator only). */
+.ar-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--ar-accent, var(--ar-blue));
+  opacity: 0.85;
+}
+.ar-card:hover {
+  transform: translateY(-3px);
+  border-color: color-mix(in srgb, var(--ar-blue) 45%, var(--ar-hairline));
+  box-shadow: var(--ar-shadow-lg);
+}
+
+.ar-kicker {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-family: var(--ar-font-mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.13em;
+  color: var(--ar-muted);
+  margin-bottom: 0.65rem;
+}
+.ar-kdot { opacity: 0.5; }
+.ar-kicker-date,
+.ar-kicker-link {
+  color: var(--ar-muted);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+.ar-kicker-date:hover,
+.ar-kicker-link:hover { color: var(--ar-blue); }
+
+.ar-card-title {
+  margin: 0 0 0.6rem;
+  font-size: 1.18rem;
+  font-weight: 600;
+  line-height: 1.32;
+  letter-spacing: -0.012em;
+}
+.ar-card-title a {
+  color: var(--ar-ink);
+  text-decoration: none;
+  background-image: linear-gradient(var(--ar-blue), var(--ar-blue));
+  background-size: 0% 2px;
+  background-position: 0 100%;
+  background-repeat: no-repeat;
+  transition: background-size 0.25s ease, color 0.16s ease;
+}
+.ar-card-title a:hover {
+  color: var(--ar-blue);
+  background-size: 100% 2px;
+}
+
+.ar-excerpt {
+  margin: 0;
+  font-size: 0.94rem;
+  line-height: 1.6;
+  color: var(--ar-body);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ar-card-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.1rem;
+  padding-top: 0.95rem;
+  border-top: 1px solid var(--ar-hairline);
+}
+.ar-card-reacts {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.ar-card-comments {
+  font-family: var(--ar-font-mono);
+  font-size: 0.76rem;
+  color: var(--ar-muted);
+  font-variant-numeric: tabular-nums;
+}
+/* Push the GitHub button to the right edge of the foot row. */
+.ar-card-foot .ar-ghbtn { margin-left: auto; }
+
+/* =========================================================================
+   7. Item detail page + comments
+   ========================================================================= */
+
+.ar-detail {
+  position: relative;
+  margin-top: 0.5rem;
+}
+.ar-detail > .ar-kicker {
+  font-size: 0.72rem;
+  margin-bottom: 1.1rem;
+}
+.ar-body-lg {
+  font-size: 1.02rem;
+  line-height: 1.7;
+  color: var(--ar-body);
+}
+.ar-body-lg > :first-child { margin-top: 0; }
+.ar-body-lg h1, .ar-body-lg h2, .ar-body-lg h3 {
+  color: var(--ar-ink);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+.ar-body strong, .ar-body-lg strong { color: var(--ar-ink); }
+.ar-body hr, .ar-body-lg hr {
+  border: 0;
+  border-top: 1px solid var(--ar-hairline);
+  margin: 1.4rem 0;
+}
+
+.ar-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 1.4rem;
+}
+
+.ar-comments-open {
+  margin-top: 2.25rem;
+  padding-top: 0.5rem;
+}
+.ar-comments-head {
+  font-family: var(--ar-font-display);
+  font-size: 1.2rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--ar-ink);
+  margin-bottom: 1rem;
+}
+.ar-comment {
+  margin-top: 0.85rem;
+  padding: 0.9rem 1.1rem;
+  border-radius: var(--ar-radius-sm);
+  background: var(--ar-surface-soft);
+  border: 1px solid var(--ar-hairline);
+}
+.ar-comment-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--ar-ink);
+}
+.ar-comment-head a { color: var(--ar-blue-link); text-decoration: none; }
+.ar-comment-date {
+  font-family: var(--ar-font-mono);
+  font-weight: 400;
+  font-size: 0.72rem;
+  color: var(--ar-muted);
+}
+.ar-comment-body {
+  font-size: 0.92rem;
+  color: var(--ar-body);
+}
+.ar-comment-body > :first-child { margin-top: 0.4rem; }
+.ar-comment-body > :last-child { margin-bottom: 0; }
+
+.ar-detail-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.85rem;
+  margin-top: 2.25rem;
+  padding-top: 1.4rem;
+  border-top: 1px solid var(--ar-hairline);
+}
+.ar-backlink {
+  font-family: var(--ar-font-mono);
+  font-size: 0.82rem;
+  color: var(--ar-muted);
+  text-decoration: none;
+  transition: color 0.15s ease;
+}
+.ar-backlink:hover { color: var(--ar-blue); }
+
+/* =========================================================================
+   8. Tags, reaction chips, GitHub buttons
+   ========================================================================= */
+
+.ar-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 1.1rem;
+}
+.ar-tag {
+  font-family: var(--ar-font-mono);
+  font-size: 0.74rem;
+  font-weight: 500;
+  padding: 0.22rem 0.7rem;
+  border-radius: var(--ar-pill);
+  background: color-mix(in srgb, var(--ar-blue) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ar-blue) 26%, transparent);
+  color: var(--ar-blue-link);
+  text-decoration: none;
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+.ar-tag:hover {
+  background: color-mix(in srgb, var(--ar-blue) 18%, transparent);
+  border-color: var(--ar-blue);
+  transform: translateY(-1px);
+}
+
+.ar-chip {
+  font-family: var(--ar-font-mono);
+  font-size: 0.78rem;
+  padding: 0.14rem 0.62rem;
+  border-radius: var(--ar-pill);
+  background: var(--ar-surface-strong);
+  border: 1px solid var(--ar-hairline);
+  color: var(--ar-body);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Small secondary pill linking out to the source Issue — Coinbase secondary. */
+.ar-ghbtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: var(--ar-font-mono);
+  font-size: 0.74rem;
+  font-weight: 500;
+  padding: 0.32rem 0.8rem;
+  border-radius: var(--ar-pill);
+  background: var(--ar-surface-strong);
+  border: 1px solid var(--ar-hairline);
+  color: var(--ar-body);
+  text-decoration: none;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.ar-ghbtn::after { content: '↗'; opacity: 0.7; }
+.ar-ghbtn:hover {
+  color: var(--ar-blue);
+  border-color: var(--ar-blue);
+  background: color-mix(in srgb, var(--ar-blue) 7%, var(--ar-surface-strong));
+}
+.ar-ghbtn-lg {
+  font-family: var(--ar-font-display);
+  font-size: 0.92rem;
+  padding: 0.6rem 1.25rem;
+}
+
+.ar-empty {
+  padding: 3.5rem 2rem;
+  text-align: center;
+  color: var(--ar-muted);
+  border: 1px dashed var(--ar-hairline-strong);
+  border-radius: var(--ar-radius);
+  background: var(--ar-surface);
+}
+
+.ar-giscus {
+  margin-top: var(--ar-section);
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--ar-hairline);
+}
+
+/* =========================================================================
+   9. Motion + responsive
+   ========================================================================= */
+
+@keyframes ar-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.ar-stat,
+.ar-run,
+.ar-card,
+.ar-react-link {
+  animation: ar-rise 0.5s cubic-bezier(0.22, 0.7, 0.2, 1) both;
+}
+.ar-grid > .ar-card:nth-child(1),
+.ar-runs > .ar-run:nth-child(1),
+.ar-stats > .ar-stat:nth-child(1) { animation-delay: 0.02s; }
+.ar-grid > .ar-card:nth-child(2),
+.ar-runs > .ar-run:nth-child(2),
+.ar-stats > .ar-stat:nth-child(2) { animation-delay: 0.07s; }
+.ar-grid > .ar-card:nth-child(3),
+.ar-runs > .ar-run:nth-child(3),
+.ar-stats > .ar-stat:nth-child(3) { animation-delay: 0.12s; }
+.ar-grid > .ar-card:nth-child(4),
+.ar-runs > .ar-run:nth-child(4),
+.ar-stats > .ar-stat:nth-child(4) { animation-delay: 0.17s; }
+.ar-grid > .ar-card:nth-child(n + 5),
+.ar-runs > .ar-run:nth-child(n + 5),
+.ar-stats > .ar-stat:nth-child(n + 5) { animation-delay: 0.22s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ar-stat, .ar-run, .ar-card, .ar-react-link { animation: none; }
+  .ar-run:hover, .ar-card:hover, .ar-stat-link:hover,
+  .hero .actions a:hover, .ar-tag:hover, .ar-react-link:hover { transform: none; }
+}

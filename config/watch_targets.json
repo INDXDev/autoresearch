@@ -1,0 +1,29 @@
+{
+  "//": "Site Watch targets. Each entry is ONE web page that Playwright renders on a schedule; if its content changed since the last run, Claude Code summarises the diff and the change is filed as a GitHub Issue (+ optional Slack line). Edit this list freely.",
+  "//fields": {
+    "slug": "stable id (a-z0-9-); names the snapshot file snapshots/<slug>.txt and the issue label watch:<slug>. Do NOT change it later or the baseline resets.",
+    "name": "human-readable title shown in the Issue and Slack line.",
+    "url": "the page to watch.",
+    "selector": "OPTIONAL CSS selector. When set, only the text of matching elements is tracked (great for pulling the story titles out of a busy page). Omit to track the whole page body.",
+    "wait_until": "OPTIONAL Playwright load state before snapshotting: load | domcontentloaded | networkidle | commit. Default domcontentloaded.",
+    "enabled": "OPTIONAL bool, default true. Set false to pause a target without deleting it."
+  },
+  "targets": [
+    {
+      "slug": "hacker-news",
+      "name": "Hacker News — Front Page",
+      "url": "https://news.ycombinator.com/",
+      "selector": ".titleline",
+      "wait_until": "domcontentloaded",
+      "enabled": true
+    },
+    {
+      "slug": "hacker-news-show",
+      "name": "Hacker News — Show HN",
+      "url": "https://news.ycombinator.com/show",
+      "selector": ".titleline",
+      "wait_until": "domcontentloaded",
+      "enabled": false
+    }
+  ]
+}

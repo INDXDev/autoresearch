@@ -1,0 +1,17 @@
+{
+  "name": "auto-research-site",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rich documentation site for Auto Research, built from GitHub Issues with Astro + Starlight.",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.36.0",
+    "astro": "^5.14.0",
+    "sharp": "^0.34.0"
+  }
+}

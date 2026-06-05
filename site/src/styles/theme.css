@@ -1,0 +1,12 @@
+/* Auto Research — AI-designed site theme (default scaffold).
+
+   This file is REGENERATED at build time by scripts/site_config.py from the
+   site_config.json design remembered on the `auto-research-state` branch, so the
+   published site wears the AI-chosen brand colour. This committed default keeps
+   `custom.css`'s shipped Coinbase Blue when no design exists yet (e.g. a local
+   `npm run build`, or a repo with no LLM credential). Loaded AFTER custom.css. */
+
+:root {
+  --ar-blue: #0052ff;
+  --ar-blue-active: #003ecc;
+}
